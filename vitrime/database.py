@@ -1,25 +1,34 @@
 import streamlit as st
 import json
+from sqlalchemy import text
 
-# Connexion Neon (lue depuis secrets.toml → [connections.neon])
+# Connexion Neon
 conn = st.connection("neon", type="sql")
 
 
+def _execute(sql: str, params: dict = None):
+    """Exécute une requête d'écriture (INSERT/UPDATE/DELETE) via transaction."""
+    engine = conn.engine  # accès à l'engine SQLAlchemy sous-jacent
+    with engine.begin() as connection:  # commit automatique à la sortie
+        connection.execute(text(sql), params or {})
+
+
 def init_db():
-    """Les tables sont créées manuellement dans Neon.
-    Cette fonction ne fait plus rien mais on la garde pour compatibilité."""
+    """Les tables sont créées manuellement dans Neon."""
     pass
 
 
+# ==================== CARS ====================
+
 def add_car(data: dict):
-    conn.query(
+    _execute(
         """INSERT INTO cars
         (marque, modele, annee, prix_usd, prix_fcfa, kilometrage,
          etat, description, photo_principale, photos, statut)
         VALUES (:marque, :modele, :annee, :prix_usd, :prix_fcfa,
                 :kilometrage, :etat, :description, :photo_principale,
                 :photos, :statut)""",
-        params={
+        {
             "marque": data["marque"],
             "modele": data["modele"],
             "annee": int(data["annee"]),
@@ -51,7 +60,7 @@ def get_cars(statut=None):
 
 
 def update_car(car_id, data: dict):
-    conn.query(
+    _execute(
         """UPDATE cars SET
             marque = :marque,
             modele = :modele,
@@ -63,7 +72,7 @@ def update_car(car_id, data: dict):
             description = :description,
             statut = :statut
         WHERE id = :id""",
-        params={
+        {
             "marque": data["marque"],
             "modele": data["modele"],
             "annee": int(data["annee"]),
@@ -79,14 +88,16 @@ def update_car(car_id, data: dict):
 
 
 def delete_car(car_id):
-    conn.query("DELETE FROM cars WHERE id = :id", params={"id": int(car_id)})
+    _execute("DELETE FROM cars WHERE id = :id", {"id": int(car_id)})
 
+
+# ==================== CONTACTS ====================
 
 def add_contact(data: dict):
-    conn.query(
+    _execute(
         """INSERT INTO contacts (nom, email, whatsapp, message, voiture_id)
            VALUES (:nom, :email, :whatsapp, :message, :voiture_id)""",
-        params={
+        {
             "nom": data["nom"],
             "email": data["email"],
             "whatsapp": data["whatsapp"],
