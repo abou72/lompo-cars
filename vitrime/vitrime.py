@@ -1,160 +1,129 @@
 import streamlit as st
 
-# ⚠️ DOIT être la toute première commande Streamlit
+# DOIT être la toute première commande Streamlit
 st.set_page_config(
-    page_title="Lompocars Export — Voitures USA → Afrique",
+    page_title="Lompocars Export — Voitures USA → Afrique de l'Ouest",
     page_icon="🚗",
     layout="wide",
+    initial_sidebar_state="collapsed",
 )
 
-# Maintenant on peut importer le reste
-import json
-from database import init_db, get_cars, add_contact
+import logging
+import re
+import time
+
+import config as cfg
+import ui
+from database import add_contact, get_cars, init_db
+
+log = logging.getLogger(__name__)
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+TRIS = ["Plus récentes", "Prix croissant", "Prix décroissant", "Année (récentes d'abord)"]
 
 init_db()
+ui.inject_css()
+ui.nav_and_hero()
 
-# ================== CONFIG ==================
-WHATSAPP_NUM = "13476326546"
-EMAIL_CONTACT = "contact@lompocars.com"
-NOM_BOUTIQUE = "Lompocars Export"
-DEVISE_2 = "FCFA"
-# ============================================
-# ================== CONFIG ==================
-WHATSAPP_NUM = "13476326546"          # (347) 632-6546
-EMAIL_CONTACT = "contact@lompocars.com"  # à changer plus tard
-NOM_BOUTIQUE = "Lompocars Export"
-DEVISE_2 = "FCFA"
-# ============================================
+# ------------------------------------------------------------ catalogue
+try:
+    cars = get_cars()
+except Exception:
+    log.exception("Chargement du catalogue impossible")
+    cars = []
+    st.warning("Le catalogue est momentanément indisponible. Contactez-nous sur WhatsApp en attendant.")
 
-# ---- CSS personnalisé ----
-st.markdown("""
-<style>
-.hero {
-    background: linear-gradient(135deg, #FFC107 0%, #FFD54F 100%);
-    padding: 3rem 2rem; border-radius: 16px;
-    text-align: center; margin-bottom: 2rem;
-}
-.hero h1 { color: #1A1A1A; font-size: 2.8rem; margin: 0; }
-.hero p  { color: #333; font-size: 1.2rem; margin-top: 0.5rem; }
-.badge {
-    display:inline-block; background:#1A1A1A; color:#FFC107;
-    padding:4px 12px; border-radius:20px; font-size:0.85rem;
-    font-weight:bold; margin-bottom:10px;
-}
-.prix { color: #FF6B00; font-weight: bold; font-size: 1.3rem; }
-</style>
-""", unsafe_allow_html=True)
+ui.section_header("catalogue", "Le catalogue",
+                  "Photos réelles, prix en dollars et en FCFA. Cliquez sur WhatsApp pour réserver ou poser une question.")
 
-# ---- HERO ----
-st.markdown(f"""
-<div class="hero">
-    <span class="badge">🇺🇸 USA → 🌍 AFRIQUE DE L'OUEST</span>
-    <h1>🚗 {NOM_BOUTIQUE}</h1>
-    <p>Votre voiture des USA livrée en Afrique de l'Ouest — Fiable, rapide, transparent</p>
-</div>
-""", unsafe_allow_html=True)
+if cars:
+    marques = ["Toutes"] + sorted({c["marque"] for c in cars if c["marque"]})
+    etats = ["Tous"] + sorted({c["etat"] for c in cars if c["etat"]})
 
-c1, c2 = st.columns(2)
-with c1:
-    st.link_button(
-        "📱 WhatsApp — (347) 632-6546",
-        f"https://wa.me/{WHATSAPP_NUM}",
-        use_container_width=True,
-    )
-with c2:
-    st.link_button(
-        "✉️ Nous écrire",
-        f"mailto:{EMAIL_CONTACT}",
-        use_container_width=True,
-    )
+    f1, f2, f3, f4 = st.columns([2.2, 1.2, 1.2, 1.5])
+    q = f1.text_input("Rechercher", placeholder="Ex. Camry, Highlander…").strip().lower()
+    marque_f = f2.selectbox("Marque", marques)
+    etat_f = f3.selectbox("État", etats)
+    tri = f4.selectbox("Trier par", TRIS)
 
-st.divider()
+    filtered = [
+        c for c in cars
+        if (marque_f == "Toutes" or c["marque"] == marque_f)
+        and (etat_f == "Tous" or c["etat"] == etat_f)
+        and (not q or q in f"{c['marque']} {c['modele']} {c.get('annee') or ''}".lower())
+    ]
+    prix = lambda c: float(c.get("prix_usd") or 0)
+    annee = lambda c: int(c.get("annee") or 0)
+    if tri == "Prix croissant":
+        filtered.sort(key=prix)
+    elif tri == "Prix décroissant":
+        filtered.sort(key=prix, reverse=True)
+    elif tri.startswith("Année"):
+        filtered.sort(key=annee, reverse=True)
+    filtered.sort(key=lambda c: c.get("statut") == "Vendu")  # vendus en dernier (tri stable)
 
-# ---- CATALOGUE ----
-st.markdown("## 🚙 Notre catalogue")
+    # pagination : on repart de zéro dès que les filtres changent
+    signature = (q, marque_f, etat_f, tri)
+    if st.session_state.get("sig") != signature:
+        st.session_state.sig = signature
+        st.session_state.shown = cfg.PAGE_SIZE
+    shown = st.session_state.get("shown", cfg.PAGE_SIZE)
 
-cars = get_cars()
-if not cars:
-    st.info("Aucune voiture disponible pour le moment. Revenez bientôt !")
-    st.stop()
+    if filtered:
+        n = len(filtered)
+        st.markdown(f'<div class="vt"><p class="count">{n} véhicule{"s" if n > 1 else ""}</p></div>',
+                    unsafe_allow_html=True)
+        ui.render_grid(filtered[:shown])
+        if n > shown:
+            _, mid, _ = st.columns([1, 1, 1])
+            if mid.button("Afficher plus de véhicules", use_container_width=True):
+                st.session_state.shown = shown + cfg.PAGE_SIZE
+                st.rerun()
+    else:
+        ui.md('<div class="empty"><strong>Aucun véhicule ne correspond.</strong>'
+              'Modifiez les filtres ou écrivez-nous : nous cherchons votre modèle sur demande.</div>')
+elif cars == []:
+    ui.md('<div class="empty"><strong>Le catalogue se remplit.</strong>'
+          'Écrivez-nous sur WhatsApp pour connaître les arrivages.</div>')
 
-# Filtres
-marques = ["Toutes"] + sorted({c["marque"] for c in cars if c["marque"]})
-etats = ["Tous", "Neuf", "Occasion"]
+# ------------------------------------------------------------ process / confiance / zones
+ui.process_and_why()
 
-f1, f2 = st.columns(2)
-with f1:
-    marque_f = st.selectbox("Marque", marques)
-with f2:
-    etat_f = st.selectbox("État", etats)
+# ------------------------------------------------------------ contact
+left, right = st.columns([5, 6], gap="large")
+with left:
+    ui.contact_side()
+with right:
+    st.markdown('<div style="height:4.2rem"></div>', unsafe_allow_html=True)
+    options = {"Autre / sur demande": None}
+    for c in cars:
+        if c.get("statut") != "Vendu":
+            options[f"{c['marque']} {c['modele']} {c.get('annee') or ''} (#{c['id']})".replace("  ", " ")] = c["id"]
+    with st.form("contact_form", clear_on_submit=True):
+        nom = st.text_input("Votre nom *")
+        c1, c2 = st.columns(2)
+        email = c1.text_input("E-mail")
+        wa = c2.text_input("WhatsApp", placeholder="+225 …")
+        voiture = st.selectbox("Véhicule concerné", list(options))
+        message = st.text_area("Votre message *", height=110)
+        envoyer = st.form_submit_button("Envoyer ma demande", type="primary", use_container_width=True)
 
-filtered = [
-    c for c in cars
-    if (marque_f == "Toutes" or c["marque"] == marque_f)
-    and (etat_f == "Tous" or c["etat"] == etat_f)
-]
+    if envoyer:
+        if not nom.strip() or not message.strip():
+            st.error("Indiquez votre nom et votre message.")
+        elif not email.strip() and not wa.strip():
+            st.error("Laissez un e-mail ou un numéro WhatsApp pour que nous puissions vous répondre.")
+        elif email.strip() and not EMAIL_RE.match(email.strip()):
+            st.error("Cette adresse e-mail ne semble pas valide.")
+        elif time.time() - st.session_state.get("last_contact", 0) < 20:
+            st.warning("Votre demande vient d'être envoyée. Patientez quelques secondes avant d'en envoyer une autre.")
+        else:
+            try:
+                add_contact({"nom": nom, "email": email, "whatsapp": wa,
+                             "message": message, "voiture_id": options[voiture]})
+                st.session_state.last_contact = time.time()
+                st.success("Demande envoyée. Nous vous recontactons très vite.")
+            except Exception:
+                log.exception("Enregistrement du contact impossible")
+                st.error("L'envoi a échoué. Écrivez-nous directement sur WhatsApp.")
 
-# Grille
-cols = st.columns(3)
-for i, car in enumerate(filtered):
-    with cols[i % 3]:
-        with st.container(border=True):
-            img = car["photo_principale"] or "https://via.placeholder.com/400x250?text=Lompocars"
-            st.image(img, use_container_width=True)
-
-            st.markdown(f"### {car['marque']} {car['modele']}")
-            st.caption(f"📅 {car['annee']} • 🛣️ {car['kilometrage']:,} km • {car['etat']}")
-
-            st.markdown(
-                f"<p class='prix'>{car['prix_usd']:,.0f} $ "
-                f"<small>(≈ {car['prix_fcfa']:,.0f} {DEVISE_2})</small></p>",
-                unsafe_allow_html=True,
-            )
-
-            if car["statut"] == "Vendu":
-                st.error("❌ VENDU")
-            else:
-                msg = (
-                    f"Bonjour Lompocars, je suis intéressé par la "
-                    f"{car['marque']} {car['modele']} {car['annee']} "
-                    f"(réf. #{car['id']})"
-                )
-                wa_url = f"https://wa.me/{WHATSAPP_NUM}?text={msg.replace(' ', '%20')}"
-                st.link_button("📱 Contacter sur WhatsApp", wa_url, use_container_width=True)
-
-            with st.expander("Voir plus / Demander info"):
-                st.write(car["description"] or "Pas de description.")
-
-                # Photos supplémentaires (JSONB → liste Python)
-                photos = car.get("photos")
-                if isinstance(photos, str):
-                    try:
-                        photos = json.loads(photos)
-                    except Exception:
-                        photos = []
-                if photos and len(photos) > 1:
-                    st.write("**Autres photos :**")
-                    for p in photos[1:]:
-                        st.image(p, use_container_width=True)
-
-                with st.form(f"contact_{car['id']}"):
-                    st.write("**Vous êtes intéressé ? Laissez vos coordonnées :**")
-                    nom = st.text_input("Votre nom")
-                    email = st.text_input("Email")
-                    wa = st.text_input("WhatsApp")
-                    msg2 = st.text_area("Message")
-                    if st.form_submit_button("📩 Envoyer"):
-                        add_contact({
-                            "nom": nom,
-                            "email": email,
-                            "whatsapp": wa,
-                            "message": msg2,
-                            "voiture_id": car["id"],
-                        })
-                        st.success("✅ Message envoyé ! Nous vous recontactons vite.")
-
-st.divider()
-st.caption(
-    f"© {NOM_BOUTIQUE} — Export USA → Afrique de l'Ouest • "
-    f"WhatsApp : (347) 632-6546"
-)
+ui.footer()

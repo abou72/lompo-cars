@@ -1,112 +1,162 @@
-import streamlit as st
+"""Accès à la base Neon (PostgreSQL) via st.connection.
+
+Les lectures passent par conn.query() (mises en cache), les écritures par une
+session SQLAlchemy avec commit explicite, puis le cache est vidé.
+"""
+from __future__ import annotations
+
 import json
+import logging
+
+import pandas as pd
+import streamlit as st
 from sqlalchemy import text
 
-# Connexion Neon
-conn = st.connection("neon", type="sql")
+log = logging.getLogger(__name__)
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS cars (
+    id SERIAL PRIMARY KEY,
+    marque TEXT NOT NULL,
+    modele TEXT NOT NULL,
+    annee INTEGER,
+    prix_usd NUMERIC DEFAULT 0,
+    prix_fcfa NUMERIC DEFAULT 0,
+    kilometrage INTEGER DEFAULT 0,
+    etat TEXT DEFAULT 'Occasion',
+    description TEXT,
+    photo_principale TEXT,
+    photos JSONB DEFAULT '[]'::jsonb,
+    statut TEXT DEFAULT 'Disponible',
+    date_ajout TIMESTAMPTZ DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS contacts (
+    id SERIAL PRIMARY KEY,
+    nom TEXT,
+    email TEXT,
+    whatsapp TEXT,
+    message TEXT,
+    voiture_id INTEGER REFERENCES cars(id) ON DELETE SET NULL,
+    date TIMESTAMPTZ DEFAULT now()
+);
+"""
 
 
-def _execute(sql: str, params: dict = None):
-    """Exécute une requête d'écriture (INSERT/UPDATE/DELETE) via transaction."""
-    engine = conn.engine  # accès à l'engine SQLAlchemy sous-jacent
-    with engine.begin() as connection:  # commit automatique à la sortie
-        connection.execute(text(sql), params or {})
+def _conn():
+    return st.connection("neon", type="sql")
 
 
-def init_db():
-    """Les tables sont créées manuellement dans Neon."""
-    pass
+def _records(df: pd.DataFrame) -> list[dict]:
+    """DataFrame -> liste de dicts, NaN/NaT remplacés par None."""
+    if df.empty:
+        return []
+    return df.astype(object).where(df.notna(), None).to_dict("records")
 
 
-# ==================== CARS ====================
-
-def add_car(data: dict):
-    _execute(
-        """INSERT INTO cars
-        (marque, modele, annee, prix_usd, prix_fcfa, kilometrage,
-         etat, description, photo_principale, photos, statut)
-        VALUES (:marque, :modele, :annee, :prix_usd, :prix_fcfa,
-                :kilometrage, :etat, :description, :photo_principale,
-                :photos, :statut)""",
-        {
-            "marque": data["marque"],
-            "modele": data["modele"],
-            "annee": int(data["annee"]),
-            "prix_usd": float(data["prix_usd"]),
-            "prix_fcfa": float(data["prix_fcfa"]),
-            "kilometrage": int(data["kilometrage"]),
-            "etat": data["etat"],
-            "description": data["description"],
-            "photo_principale": data["photo_principale"],
-            "photos": json.dumps(data["photos"]),
-            "statut": data.get("statut", "Disponible"),
-        },
-    )
+def _execute(sql: str, params: dict) -> None:
+    with _conn().session as s:
+        s.execute(text(sql), params)
+        s.commit()
+    st.cache_data.clear()  # les listes mises en cache sont périmées
 
 
-def get_cars(statut=None):
+@st.cache_resource(show_spinner=False)
+def _ensure_schema() -> bool:
+    try:
+        with _conn().session as s:
+            for stmt in SCHEMA.split(";"):
+                if stmt.strip():
+                    s.execute(text(stmt))
+            s.commit()
+        return True
+    except Exception:  # base SQLite de test, droits limités, etc.
+        log.warning("Création du schéma ignorée", exc_info=True)
+        return False
+
+
+def init_db() -> None:
+    """Crée les tables si elles n'existent pas (une seule fois par processus)."""
+    _ensure_schema()
+
+
+# ---------------------------------------------------------------- voitures
+def get_cars(statut: str | None = None) -> list[dict]:
     if statut:
-        df = conn.query(
+        df = _conn().query(
             "SELECT * FROM cars WHERE statut = :statut ORDER BY date_ajout DESC",
-            params={"statut": statut},
-            ttl=5,
+            params={"statut": statut}, ttl=30,
         )
     else:
-        df = conn.query(
-            "SELECT * FROM cars ORDER BY date_ajout DESC",
-            ttl=5,
-        )
-    return df.to_dict("records")
+        df = _conn().query("SELECT * FROM cars ORDER BY date_ajout DESC", ttl=30)
+    return _records(df)
 
 
-def update_car(car_id, data: dict):
+def _car_params(data: dict) -> dict:
+    return {
+        "marque": data["marque"].strip(),
+        "modele": data["modele"].strip(),
+        "annee": int(data["annee"]),
+        "prix_usd": float(data["prix_usd"]),
+        "prix_fcfa": float(data["prix_fcfa"]),
+        "kilometrage": int(data["kilometrage"]),
+        "etat": data["etat"],
+        "description": (data.get("description") or "").strip(),
+        "statut": data.get("statut", "Disponible"),
+    }
+
+
+def add_car(data: dict) -> None:
+    params = _car_params(data)
+    params["photo_principale"] = data["photo_principale"]
+    params["photos"] = json.dumps(data["photos"])
     _execute(
-        """UPDATE cars SET
-            marque = :marque,
-            modele = :modele,
-            annee = :annee,
-            prix_usd = :prix_usd,
-            prix_fcfa = :prix_fcfa,
-            kilometrage = :kilometrage,
-            etat = :etat,
-            description = :description,
-            statut = :statut
-        WHERE id = :id""",
-        {
-            "marque": data["marque"],
-            "modele": data["modele"],
-            "annee": int(data["annee"]),
-            "prix_usd": float(data["prix_usd"]),
-            "prix_fcfa": float(data["prix_fcfa"]),
-            "kilometrage": int(data["kilometrage"]),
-            "etat": data["etat"],
-            "description": data["description"],
-            "statut": data["statut"],
-            "id": int(car_id),
-        },
+        """INSERT INTO cars
+           (marque, modele, annee, prix_usd, prix_fcfa, kilometrage,
+            etat, description, photo_principale, photos, statut)
+           VALUES (:marque, :modele, :annee, :prix_usd, :prix_fcfa, :kilometrage,
+                   :etat, :description, :photo_principale, :photos, :statut)""",
+        params,
     )
 
 
-def delete_car(car_id):
+def update_car(car_id, data: dict) -> None:
+    params = _car_params(data)
+    params["id"] = int(car_id)
+    _execute(
+        """UPDATE cars SET
+               marque = :marque, modele = :modele, annee = :annee,
+               prix_usd = :prix_usd, prix_fcfa = :prix_fcfa,
+               kilometrage = :kilometrage, etat = :etat,
+               description = :description, statut = :statut
+           WHERE id = :id""",
+        params,
+    )
+
+
+def delete_car(car_id) -> None:
     _execute("DELETE FROM cars WHERE id = :id", {"id": int(car_id)})
 
 
-# ==================== CONTACTS ====================
-
-def add_contact(data: dict):
+# ---------------------------------------------------------------- contacts
+def add_contact(data: dict) -> None:
     _execute(
         """INSERT INTO contacts (nom, email, whatsapp, message, voiture_id)
            VALUES (:nom, :email, :whatsapp, :message, :voiture_id)""",
         {
-            "nom": data["nom"],
-            "email": data["email"],
-            "whatsapp": data["whatsapp"],
-            "message": data["message"],
+            "nom": data["nom"].strip(),
+            "email": (data.get("email") or "").strip(),
+            "whatsapp": (data.get("whatsapp") or "").strip(),
+            "message": data["message"].strip(),
             "voiture_id": data.get("voiture_id"),
         },
     )
 
 
-def get_contacts():
-    df = conn.query("SELECT * FROM contacts ORDER BY date DESC", ttl=5)
-    return df.to_dict("records")
+def get_contacts() -> list[dict]:
+    df = _conn().query(
+        """SELECT c.*, v.marque, v.modele, v.annee
+           FROM contacts c LEFT JOIN cars v ON v.id = c.voiture_id
+           ORDER BY c.date DESC""",
+        ttl=30,
+    )
+    return _records(df)
