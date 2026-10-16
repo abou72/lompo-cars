@@ -42,8 +42,30 @@ CREATE TABLE IF NOT EXISTS contacts (
 """
 
 
+def _db_url() -> str | None:
+    """URL Neon des secrets, avec le pilote psycopg2 explicite.
+
+    SQLAlchemy 2.1 choisit psycopg (v3) pour « postgresql:// » : on force
+    psycopg2 (déjà dans requirements.txt) pour éviter « No module named psycopg ».
+    """
+    try:
+        url = st.secrets["connections"]["neon"]["url"]
+    except Exception:
+        return None
+    for prefix in ("postgresql://", "postgres://"):
+        if url.startswith(prefix):
+            return "postgresql+psycopg2://" + url[len(prefix):]
+    return url
+
+
 def _conn():
-    return st.connection("neon", type="sql")
+    # pool_pre_ping / pool_recycle : Neon coupe les connexions inactives
+    # (« SSL connection has been closed unexpectedly »), on les rouvre à la volée.
+    kwargs = {"pool_pre_ping": True, "pool_recycle": 280}
+    url = _db_url()
+    if url:
+        kwargs["url"] = url
+    return st.connection("neon", type="sql", **kwargs)
 
 
 def _records(df: pd.DataFrame) -> list[dict]:

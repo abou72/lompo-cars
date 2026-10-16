@@ -75,7 +75,7 @@ if cars:
         ui.render_grid(filtered[:shown])
         if n > shown:
             _, mid, _ = st.columns([1, 1, 1])
-            if mid.button("Afficher plus de véhicules", use_container_width=True):
+            if mid.button("Afficher plus de véhicules", width="stretch"):
                 st.session_state.shown = shown + cfg.PAGE_SIZE
                 st.rerun()
     else:
@@ -105,7 +105,7 @@ with right:
         wa = c2.text_input("WhatsApp", placeholder="+225 …")
         voiture = st.selectbox("Véhicule concerné", list(options))
         message = st.text_area("Votre message *", height=110)
-        envoyer = st.form_submit_button("Envoyer ma demande", type="primary", use_container_width=True)
+        envoyer = st.form_submit_button("Envoyer ma demande", type="primary", width="stretch")
 
     if envoyer:
         if not nom.strip() or not message.strip():
